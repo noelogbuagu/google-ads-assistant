@@ -1,0 +1,12 @@
+why is this important?
+how do you get the data currently?
+what is your process?
+
+- A daily report on the performance of the google adds account. ads for weight loss and non-weight loss. can separate or split by campaign names. all weightloss campaigns have weight in them and non don't have weight. 
+    how much did we spend, how many orders (conversions), how much did we pay (cpa/cac), how high is the conversion rate, impression share / market share, suggestions?, compare to last week
+- takes about an hour every day. have to compare to GA data.
+- 13 campaigns, 2 reports (1 wl, 1 non-wl), just for kap, 
+- look at ctr for ads? examine ads
+- look at conversion rate for keywords
+- $500 is the cpa for kap. 
+daily monitoring of search terms that should be excluded because of cost. 
