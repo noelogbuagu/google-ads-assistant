@@ -1,0 +1,22 @@
+services:
+  caddy:
+    container_name: "${PROJECT_NAME}-caddy"
+    env_file:
+      - ./.env
+    image: caddy:latest
+    ports:
+      - "80:80"
+      - "127.0.0.1:2019:2019"
+      - "443:443"
+    restart: always
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - /var/log/caddy:/var/log/caddy
+      - caddy-config:/config
+      - caddy-data:/data
+
+volumes:
+  caddy-config:
+    name: "${PROJECT_NAME}-caddy-config"
+  caddy-data:
+    name: "${PROJECT_NAME}-caddy-data"
