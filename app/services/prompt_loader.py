@@ -1,7 +1,13 @@
+import re
 from pathlib import Path
 
-import frontmatter
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError, meta
+
+
+def _strip_frontmatter(text: str) -> str:
+    """Removes YAML frontmatter (--- ... ---) from the start of a template string."""
+    return re.sub(r"^\s*---.*?---\s*", "", text, flags=re.DOTALL)
+
 
 """
 Prompt Management Module
@@ -31,7 +37,7 @@ class PromptManager:
         info = PromptManager.get_template_info("greeting")
     """
 
-    _env = None
+    _env: Environment | None = None
 
     @classmethod
     def _get_env(cls, templates_dir="prompts") -> Environment:
@@ -72,12 +78,16 @@ class PromptManager:
         """
         env = PromptManager._get_env()
         template_path = f"{template}.j2"
-        with open(env.loader.get_source(env, template_path)[1]) as file:
-            post = frontmatter.load(file)
+        assert env.loader is not None
+        _, filepath, _ = env.loader.get_source(env, template_path)
+        assert filepath is not None, f"Could not resolve path for template: {template_path}"
+        with open(filepath) as file:
+            raw = file.read()
 
-        template = env.from_string(post.content)
+        content = _strip_frontmatter(raw)
+        jinja_template = env.from_string(content)
         try:
-            return template.render(**kwargs)
+            return jinja_template.render(**kwargs)
         except TemplateError as e:
             raise ValueError(f"Error rendering template: {str(e)}")
 
@@ -101,16 +111,20 @@ class PromptManager:
         """
         env = PromptManager._get_env()
         template_path = f"{template}.j2"
-        with open(env.loader.get_source(env, template_path)[1]) as file:
-            post = frontmatter.load(file)
+        assert env.loader is not None
+        _, filepath, _ = env.loader.get_source(env, template_path)
+        assert filepath is not None, f"Could not resolve path for template: {template_path}"
+        with open(filepath) as file:
+            raw = file.read()
 
-        ast = env.parse(post.content)
+        content = _strip_frontmatter(raw)
+        ast = env.parse(content)
         variables = meta.find_undeclared_variables(ast)
 
         return {
             "name": template,
-            "description": post.metadata.get("description", "No description provided"),
-            "author": post.metadata.get("author", "Unknown"),
+            "description": "",
+            "author": "",
             "variables": list(variables),
-            "frontmatter": post.metadata,
+            "frontmatter": {},
         }
