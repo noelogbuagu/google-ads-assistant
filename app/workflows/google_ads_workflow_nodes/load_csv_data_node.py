@@ -7,7 +7,7 @@ class LoadCSVDataNode(Node):
     async def process(self, task_context: TaskContext) -> TaskContext:
         print("Loading CSV data...")
         loader = CSVLoader()
-        data = loader.load_csvs(task_context.event.data_dir)
+        data = loader.load_csvs(task_context.event.data_dir, files=task_context.event.files)
 
         print(
             f"  Loaded: {data['oldest']['date']} | "

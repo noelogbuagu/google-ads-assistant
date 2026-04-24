@@ -6,10 +6,15 @@ from pathlib import Path
 class CSVLoader:
     """Loads and parses Google Ads campaign CSV exports from a directory."""
 
-    def load_csvs(self, data_dir: Path) -> dict:
+    def load_csvs(self, data_dir: Path, files: list[Path] | None = None) -> dict:
         """
-        Loads all cr_*.csv files from data_dir, sorted chronologically by the
-        date embedded in row 2 of each file.
+        Loads exactly 3 CSV files, sorted chronologically by the date embedded
+        in row 2 of each file.
+
+        Args:
+            data_dir: Directory to scan for cr_*.csv files (used when files=None).
+            files: Explicit list of exactly 3 CSV paths. When provided, data_dir
+                   is ignored.
 
         Returns:
             {
@@ -20,13 +25,19 @@ class CSVLoader:
 
         Raises:
             FileNotFoundError: If data_dir missing or fewer than 3 CSVs found.
+            ValueError: If files list does not contain exactly 3 paths.
         """
-        csv_files = sorted(data_dir.glob("cr_*.csv"))
-        if len(csv_files) < 3:
-            raise FileNotFoundError(
-                f"Expected at least 3 CSV files in '{data_dir}', found {len(csv_files)}. "
-                f"Files must match pattern cr_*.csv"
-            )
+        if files is not None:
+            if len(files) != 3:
+                raise ValueError(f"--files requires exactly 3 CSV paths, got {len(files)}.")
+            csv_files = [Path(f) for f in files]
+        else:
+            csv_files = sorted(data_dir.glob("cr_*.csv"))
+            if len(csv_files) < 3:
+                raise FileNotFoundError(
+                    f"Expected at least 3 CSV files in '{data_dir}', found {len(csv_files)}. "
+                    f"Files must match pattern cr_*.csv"
+                )
 
         dated = [(self._parse_date_from_header(f), f) for f in csv_files]
         dated.sort(key=lambda x: x[0])
