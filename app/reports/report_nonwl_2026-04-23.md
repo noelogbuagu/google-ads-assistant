@@ -1,11 +1,11 @@
 # Google Ads Performance Report — Non-Weight Loss (Non-WL) Segment
-**Report Date:** 2026-04-23 | **Dates Covered:** 2026-04-09 · 2026-04-16 · 2026-04-23
+**Report Dates:** 2026-04-09 | 2026-04-16 | 2026-04-23
 
 ---
 
 ## 1. Executive Summary
 
-The Non-WL segment has experienced a sustained two-week deterioration in conversion efficiency: CPA climbed from $57.65 to $79.45 to $113.26 across the three dates, representing a +96.5% overall increase, driven primarily by a sharp -30.7% drop in conversions in the most recent WoW 2 period despite spend remaining virtually flat (-1.2%). The single most important signal is the collapse in CVR from 6.00% → 3.36% → 2.38%, indicating that the traffic being purchased is converting at less than half the rate seen two weeks prior. While all three dates remain well below the $500 CPA target, the trend trajectory is concerning — if the CVR decline continues at the current rate, CPA will deteriorate significantly further without intervention.
+The Non-WL segment has experienced a consistent deterioration across both comparison periods, with blended CPA nearly doubling from $57.65 to $113.26 over the three-week span — driven primarily by a sharp 30.7% collapse in conversions in the most recent period (WoW 2) while spend held near flat. The single most important signal is the segment-wide CVR decline from 6.00% to 2.38%, which is compressing conversion volume across nearly every campaign and inflating CPA at an accelerating rate. Despite this, the segment remains well below the $500 CPA target at all three dates; however, the directional trend is a clear cause for concern and requires immediate investigation to avoid further deterioration.
 
 ### Key Metrics
 
@@ -25,7 +25,7 @@ The Non-WL segment has experienced a sustained two-week deterioration in convers
 
 ---
 
-### DE | Birth Control | All | PMX
+### DE | Birth control | All | PMX
 **Daily Budget:** $391.68/day
 
 | Metric | 2026-04-09 | 2026-04-16 | 2026-04-23 | WoW 1 Δ | WoW 2 Δ |
@@ -40,11 +40,9 @@ The Non-WL segment has experienced a sustained two-week deterioration in convers
 | Avg CPC | $2.71 | $2.25 | $1.59 | ↓-$0.46 (-17.0%) | ↓-$0.66 (-29.3%) |
 | Daily Budget | $391.68 | $391.68 | $391.68 | — | — |
 
-> **Note:** Zero conversions recorded in both WoW 1 and WoW 2 periods. CPA uncalculable for 2026-04-16 and 2026-04-23.
-
 ---
 
-### DE | Birth Control | Search | Prospecting | tCPA
+### DE | Birth control | Search | Prospecting | tCPA
 **Daily Budget:** $1,500.00/day
 
 | Metric | 2026-04-09 | 2026-04-16 | 2026-04-23 | WoW 1 Δ | WoW 2 Δ |
@@ -59,7 +57,7 @@ The Non-WL segment has experienced a sustained two-week deterioration in convers
 | Avg CPC | $2.97 | $2.91 | $2.64 | ↓-$0.06 (-2.0%) | ↓-$0.27 (-9.3%) |
 | Daily Budget | $1,500.00 | $1,500.00 | $1,500.00 | — | — |
 
-> ⚠️ CPA exceeds $500 target threshold warning does not apply here numerically, but note the rapid acceleration: CPA has risen +408.6% from $49.82 to $253.43 over two periods and is trending toward the $500 limit. CPA values flagged above reflect values above $100 as a directional concern; neither yet breaches $500 but the trajectory is alarming.
+> ⚠️ CPA exceeded $500 target threshold — CPA is below $500 in absolute terms but trajectory is deeply concerning: CPA has risen from $49.82 to $253.43 in two weeks with conversions collapsing 80.0% in WoW 2.
 
 ---
 
@@ -86,20 +84,20 @@ The Non-WL segment has experienced a sustained two-week deterioration in convers
 | Metric | 2026-04-09 | 2026-04-16 | 2026-04-23 | WoW 1 Δ | WoW 2 Δ |
 |---|---|---|---|---|---|
 | Spend | $36.25 | $266.87 | $326.92 | ↑+$230.62 (+636.2%) | ↑+$60.05 (+22.5%) |
-| Conversions | 0.26 | 5.00 | 2.42 | ↑+4.74 (+1,823.1%) | ↓-2.58 (-51.6%) |
+| Conversions | 0.26 | 5.00 | 2.42 | ↑+4.74 (+1823.1%) | ↓-2.58 (-51.6%) |
 | CPA | $139.42 ⚠️ | $53.37 | $135.09 ⚠️ | ↓-$86.05 (-61.7%) | ↑+$81.72 (+153.1%) |
 | CVR | 1.18% | 2.20% | 1.27% | ↑+1.02% (+86.3%) | ↓-0.93% (-42.7%) |
 | CTR | 7.10% | 3.94% | 5.03% | ↓-3.16% (-44.5%) | ↑+1.09% (+27.7%) |
-| Impressions | 310 | 5,766 | 3,797 | ↑+5,456 (+1,760.0%) | ↓-1,969 (-34.1%) |
+| Impressions | 310 | 5,766 | 3,797 | ↑+5,456 (+1760.0%) | ↓-1,969 (-34.1%) |
 | Clicks | 22 | 226 | 191 | ↑+204 (+927.3%) | ↓-35 (-15.5%) |
 | Avg CPC | $1.65 | $1.18 | $1.71 | ↓-$0.47 (-28.5%) | ↑+$0.53 (+44.9%) |
 | Daily Budget | $600.00 | $600.00 | $600.00 | — | — |
 
-> ⚠️ CPA flagged: $139.42 (2026-04-09) and $135.09 (2026-04-23) are well below $500 but represent the highest CPA readings for this campaign and indicate reverting performance after a strong WoW 1.
+> ⚠️ CPA of $135.09 on 2026-04-23 is above the $500 target? No — $135.09 is below $500. Note: CPA was flagged above $500 only at 2026-04-09 ($139.42) — both values are below the $500 threshold but represent relatively high CPA for this segment given peers performing at $52–$73.
 
 ---
 
-### DE | ED | Potency Medication | Search | Prospecting
+### DE | ED | Potency medication | Search | Prospecting
 **Daily Budget:** $1,000.00/day
 
 | Metric | 2026-04-09 | 2026-04-16 | 2026-04-23 | WoW 1 Δ | WoW 2 Δ |
@@ -127,15 +125,17 @@ The Non-WL segment has experienced a sustained two-week deterioration in convers
 | CVR | 0.00% | 6.05% | 1.85% | ↑+6.05% (—) | ↓-4.20% (-69.6%) |
 | CTR | 11.27% | 6.87% | 5.08% | ↓-4.40% (-39.0%) | ↓-1.79% (-26.1%) |
 | Impressions | 142 | 1,106 | 1,023 | ↑+964 (+678.9%) | ↓-83 (-7.5%) |
-| Clicks | 16 | 76 | 47 | ↑+60 (+375.0%) | ↓-29 (-38.2%) |
+| Clicks | 16 | 76 | 52 | ↑+60 (+375.0%) | ↓-24 (-31.6%) |
 | Avg CPC | $2.14 | $2.50 | $2.32 | ↑+$0.36 (+16.8%) | ↓-$0.18 (-7.2%) |
 | Daily Budget | $1,000.00 | $1,000.00 | $1,000.00 | — | — |
 
-> ⚠️ CPA flagged at $125.45 for 2026-04-23, rising +203.6% WoW 2 on a steep conversion drop (-79.1%).
+> ⚠️ CPA rose from $41.32 to $125.45 (+203.6%) in WoW 2 with conversions dropping 79.1% — well below $500 absolute threshold but severely deteriorating.
 
 ---
 
 ### DE | Hair Loss | All | PMX
 **Daily Budget:** $440.00/day
 
-| Metric | 
+| Metric | 2026-04-09 | 2026-04-16 | 2026-04-23 | WoW 1 Δ | WoW 2 Δ |
+|---|---|---|---|---|---|
+| Spend | $105.95 | $98.97 | $62

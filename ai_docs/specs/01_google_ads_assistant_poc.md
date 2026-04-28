@@ -1,37 +1,68 @@
 # Engineering Specification: Google Ads Assistant PoC
 
+**Updated:** 2026-04-24 — Data source changed from Google Ads API to CSV files
+
 ## Context
 
 ### Current State
 
 - `app/main.py` — FastAPI app (existing, do not modify)
-- `app/workflows/workflow_registry.py` — contains `WorkflowRegistry` enum with `EXAMPLE_STREAMING_WORKFLOW`
-- `app/core/nodes/base.py` — `Node` base class with `save_output()`, `get_output()`, `update_node()`
-- `app/core/nodes/agent.py` — `AgentNode` base class with `AgentConfig`, `ModelProvider`
-- `app/core/workflow.py` — `Workflow` base class with `run()` / `run_async()`
-- `app/core/task.py` — `TaskContext` with `update_node(**kwargs)` and `stop_workflow()`
-- `app/core/schema.py` — `WorkflowSchema`, `NodeConfig`
+- `app/workflows/workflow_registry.py` — `WorkflowRegistry` enum with `EXAMPLE_STREAMING_WORKFLOW`
+- `app/core/nodes/base.py` — `Node` base class; use `task_context.update_node(self.node_name, **kwargs)`
+- `app/core/nodes/agent.py` — `AgentNode` with `AgentConfig(instructions=..., output_type=...)`
+- `app/core/workflow.py` — `Workflow` base class with `run()` (synchronous)
+- `app/core/task.py` — `TaskContext` with `update_node(**kwargs)`
 - `app/services/prompt_loader.py` — `PromptManager.get_prompt(template, **kwargs)`
 - `app/prompts/template.j2` — example Jinja2 template with frontmatter
-- `app/.env.example` — existing env template; `ANTHROPIC_API_KEY` already present
 
-No Google Ads workflow, service, schemas, or CLI entry point exist yet.
+Nothing Google Ads-related exists yet. No API credentials needed.
+
+### CSV Format (actual)
+
+Files are placed in `app/data/`. Naming convention: `cr_DD_MM.csv` (e.g. `cr_10_04.csv`).
+
+```
+Row 1:  "Campaign report"                          ← skip
+Row 2:  "April 10, 2026 - April 10, 2026"          ← parse date from here
+Row 3:  Column headers                             ← see below
+Rows 4+: Campaign data rows
+Last rows: Start with "Total:" or "Total: ..."    ← skip
+```
+
+**Relevant columns** (from row 3 headers):
+| CSV Column | Description | Notes |
+|---|---|---|
+| `Campaign status` | Enabled / Paused | |
+| `Campaign` | Campaign name | Used for WL classification |
+| `Budget` | Daily budget (USD) | Already in USD |
+| `Cost` | Spend (USD) | Already in USD; has comma thousands separator |
+| `Impr.` | Impressions | Has comma thousands separator |
+| `Clicks` | Clicks | Has comma thousands separator |
+| `Conv. rate` | CVR | Has `%` suffix |
+| `Conversions` | Conversions | May be decimal (e.g. 5.42) |
+| `Cost / conv.` | CPA (USD) | Already in USD |
+| `Avg. CPC` | Average CPC | Already in USD |
+
+**Parsing rules:**
+- Strip commas from numeric fields: `"6,627"` → `6627`
+- Strip `%` from rates and divide by 100: `"8.81%"` → `0.0881`
+- `"--"` or `"0"` → `0` (or `None` for derived metrics)
+- Filter: only include rows where `Cost` > 0 (active campaigns only)
+- Skip rows where `Campaign` starts with "Total"
 
 ### Desired Outcome
 
-Running `python app/run_report.py` from the project root authenticates with the Google Ads API, retrieves yesterday's campaign data for KAP's account, processes it into WL and Non-WL segments, generates two AI-narrated Markdown reports via Claude, and writes them to `app/reports/`.
+Running `python app/run_report.py` reads three CSVs from `app/data/`, processes them into two WoW comparisons (Apr 10→17, Apr 17→24), and generates two AI-narrated Markdown reports — one for WL campaigns and one for Non-WL — written to `app/reports/`.
 
 ### Success Criteria
 
 - `python app/run_report.py` completes without unhandled exceptions
-- `app/reports/report_wl_YYYY-MM-DD.md` and `app/reports/report_nonwl_YYYY-MM-DD.md` are written
+- `app/reports/report_wl_YYYY-MM-DD.md` and `app/reports/report_nonwl_YYYY-MM-DD.md` are written (date = most recent CSV)
 - WL report contains only campaigns whose name contains "weight" (case-insensitive)
-- Non-WL report contains all other campaigns
-- Each report has three sections: Executive Summary, Campaign Breakdown, PPP Analysis
-- Metrics (spend, conversions, CPA, CTR, CVR, impression share) match Google Ads UI for the same date
-- WoW comparison references exactly 7 days prior to the report date
-- PPP section contains specific, actionable AI-generated recommendations
-- No credentials appear in any output file or stdout
+- Non-WL report contains all other campaigns with Cost > 0
+- Each report shows two WoW comparison periods: Apr 10→17 and Apr 17→24
+- PPP section contains specific, AI-generated recommendations referencing campaign names
+- No hardcoded paths — data directory configurable via CLI flag
 
 ---
 
@@ -42,19 +73,11 @@ Running `python app/run_report.py` from the project root authenticates with the 
 **File: `app/schemas/google_ads_event_schema.py`**
 
 ```python
-from datetime import date, timedelta
-from pydantic import BaseModel, Field, model_validator
+from pathlib import Path
+from pydantic import BaseModel, Field
 
 class GoogleAdsReportEvent(BaseModel):
-    customer_id: str = Field(..., description="Google Ads Customer ID (digits only, no dashes)")
-    report_date: date = Field(default_factory=lambda: date.today() - timedelta(days=1))
-    comparison_date: date = Field(default=None)
-
-    @model_validator(mode="after")
-    def set_comparison_date(self):
-        if self.comparison_date is None:
-            self.comparison_date = self.report_date - timedelta(days=7)
-        return self
+    data_dir: Path = Field(default=Path("app/data"), description="Directory containing CSV files")
 ```
 
 **File: `app/schemas/google_ads_models.py`**
@@ -63,114 +86,113 @@ class GoogleAdsReportEvent(BaseModel):
 from typing import Optional, Tuple, Literal
 from pydantic import BaseModel
 
+# (absolute_delta, pct_delta) — pct is None when baseline is 0
+Delta = Tuple[Optional[float], Optional[float]]
+
 class CampaignDayMetrics(BaseModel):
     cost_usd: float
     conversions: float
     clicks: int
     impressions: int
-    impression_share: Optional[float]  # None if unavailable (<10% threshold from API)
-    ctr: Optional[float]               # clicks / impressions; None if impressions == 0
-    cvr: Optional[float]               # conversions / clicks; None if clicks == 0
-    cpa_usd: Optional[float]           # cost / conversions; None if conversions == 0
-
-# Delta tuple: (absolute_delta, pct_delta)
-# pct_delta is None when last_week value is 0
-Delta = Tuple[Optional[float], Optional[float]]
+    ctr: Optional[float]      # clicks / impressions; None if impressions == 0
+    cvr: Optional[float]      # conversions / clicks; None if clicks == 0
+    cpa_usd: Optional[float]  # cost / conversions; None if conversions == 0
+    avg_cpc: Optional[float]  # from CSV "Avg. CPC"; None if "--"
 
 class WoWDeltas(BaseModel):
     cost_usd: Delta
     conversions: Delta
     clicks: Delta
     impressions: Delta
-    impression_share: Delta
     ctr: Delta
     cvr: Delta
     cpa_usd: Delta
 
 class ProcessedCampaign(BaseModel):
-    id: str
     name: str
     segment: Literal["WL", "NON_WL"]
     daily_budget_usd: float
-    alltime_avg_impressions: float
-    yesterday: CampaignDayMetrics
-    last_week: CampaignDayMetrics
-    wow_deltas: WoWDeltas
+    # Three time points
+    date_oldest: CampaignDayMetrics   # Apr 10
+    date_mid: CampaignDayMetrics      # Apr 17
+    date_latest: CampaignDayMetrics   # Apr 24
+    # Two WoW deltas
+    wow1: WoWDeltas  # Apr 10 → Apr 17
+    wow2: WoWDeltas  # Apr 17 → Apr 24
 
 class SegmentAggregate(BaseModel):
     segment: Literal["WL", "NON_WL"]
     campaign_count: int
-    total_cost_usd: float
-    total_conversions: float
-    total_clicks: int
-    total_impressions: int
-    blended_cpa_usd: Optional[float]   # total_cost / total_conversions
-    avg_cvr: Optional[float]
-    avg_ctr: Optional[float]
-    avg_impression_share: Optional[float]
-    wow_deltas: WoWDeltas              # computed on aggregate values
+    # Aggregates per time point
+    total_cost_oldest: float
+    total_cost_mid: float
+    total_cost_latest: float
+    total_conversions_oldest: float
+    total_conversions_mid: float
+    total_conversions_latest: float
+    total_clicks_oldest: int
+    total_clicks_mid: int
+    total_clicks_latest: int
+    total_impressions_oldest: int
+    total_impressions_mid: int
+    total_impressions_latest: int
+    blended_cpa_oldest: Optional[float]
+    blended_cpa_mid: Optional[float]
+    blended_cpa_latest: Optional[float]
+    avg_cvr_oldest: Optional[float]
+    avg_cvr_mid: Optional[float]
+    avg_cvr_latest: Optional[float]
+    avg_ctr_oldest: Optional[float]
+    avg_ctr_mid: Optional[float]
+    avg_ctr_latest: Optional[float]
+    # Segment-level WoW deltas
+    wow1: WoWDeltas  # Apr 10 → Apr 17
+    wow2: WoWDeltas  # Apr 17 → Apr 24
 ```
 
 ---
 
 ### Interfaces & Contracts
 
-**File: `app/services/google_ads_service.py`**
+**File: `app/services/csv_loader.py`**
 
 ```python
-class GoogleAdsService:
-    def __init__(self, customer_id: str):
+class CSVLoader:
+    def load_csvs(self, data_dir: Path) -> dict[str, dict[str, dict]]:
         """
-        Initialises the Google Ads API client using credentials from environment.
+        Loads all cr_*.csv files from data_dir, sorted chronologically.
 
-        Args:
-            customer_id: Google Ads Customer ID (digits only, e.g. "1234567890")
+        Returns:
+            {
+              "oldest":  {campaign_name: raw_row_dict},   # Apr 10
+              "mid":     {campaign_name: raw_row_dict},   # Apr 17
+              "latest":  {campaign_name: raw_row_dict},   # Apr 24
+            }
 
         Raises:
-            EnvironmentError: If any required env var is missing.
-            google.ads.googleads.errors.GoogleAdsException: On auth failure.
+            FileNotFoundError: If data_dir doesn't exist or fewer than 3 CSVs found.
+            ValueError: If CSV format is unexpected (missing required columns).
+
+        Notes:
+            - Skips rows where Cost == 0
+            - Skips rows starting with "Total"
+            - Parses date from row 2 of each CSV to determine chronological order
+            - File naming convention: cr_DD_MM.csv used as fallback for sorting
         """
 
-    def fetch_campaigns(self) -> list[dict]:
+    def _parse_date_from_header(self, csv_path: Path) -> date:
         """
-        Fetches all ENABLED campaigns for the account.
-
-        Returns:
-            List of dicts: [{id, name, daily_budget_usd, start_date}]
-            - daily_budget_usd: campaign_budget.amount_micros / 1_000_000
-            - start_date: str in "YYYY-MM-DD" format
+        Reads row 2 of CSV to extract the report date.
+        Example: '"April 10, 2026 - April 10, 2026"' → date(2026, 4, 10)
         """
 
-    def fetch_metrics_for_date(self, target_date: str) -> dict[str, dict]:
+    def _parse_row(self, row: dict) -> dict:
         """
-        Fetches campaign-level metrics for a specific date.
-
-        Args:
-            target_date: Date string "YYYY-MM-DD"
-
-        Returns:
-            Dict keyed by campaign_id (str):
-            {cost_micros, conversions, clicks, impressions, search_impression_share}
-            All values are raw API values (cost in micros).
-            Returns empty dict for campaign if no impressions that day.
-        """
-
-    def fetch_alltime_avg_impressions(
-        self, campaigns: list[dict]
-    ) -> dict[str, float]:
-        """
-        Fetches average daily impressions per campaign from start_date to yesterday.
-
-        Args:
-            campaigns: List from fetch_campaigns() (needs id and start_date)
-
-        Returns:
-            Dict keyed by campaign_id: average daily impressions (float)
-            Falls back to 0.0 if campaign has no historical data.
-
-        Note:
-            Uses a single GAQL query with date range per campaign, aggregated in Python.
-            Fallback: if all-time query fails, use last 30 days.
+        Cleans a raw CSV row:
+        - Strips commas from numeric fields
+        - Strips % and divides by 100 for rates
+        - Converts '--' to None
+        - Returns cleaned dict with float/int values
         """
 ```
 
@@ -178,138 +200,165 @@ class GoogleAdsService:
 
 ### Plan - High-Level Tasks
 
-- [x] **L1** Create directory structure and install dependencies
+- [ ] **L1** Create directory structure, create `app/data/`, install `google-ads` removed (no longer needed)
 - [ ] **L2** Implement data models (`google_ads_event_schema.py`, `google_ads_models.py`)
-- [ ] **L3** Implement `GoogleAdsService` with 3 GAQL queries
-- [ ] **L4.1** Implement `FetchCampaignDataNode`
+- [ ] **L3** Implement `CSVLoader` service
+- [ ] **L4.1** Implement `LoadCSVDataNode`
 - [ ] **L4.2** Implement `ClassifyAndProcessNode`
 - [ ] **L4.3** Implement `GenerateWLReportNode`
 - [ ] **L4.4** Implement `GenerateNonWLReportNode`
 - [ ] **L4.5** Implement `WriteReportsNode`
-- [ ] **L5** Define `GoogleAdsWorkflow` and register in `WorkflowRegistry`
-- [ ] **L6** Write `app/prompts/report_generation.j2` system prompt
-- [ ] **L7** Implement `app/run_report.py` CLI entry point
-- [ ] **L8** End-to-end verification with real credentials
+- [ ] **L5** Define `GoogleAdsWorkflow` + register in `WorkflowRegistry`
+- [ ] **L6** Write `app/prompts/report_generation.j2`
+- [ ] **L7** Implement `app/run_report.py`
+- [ ] **L8** E2E test with the three real CSVs
 
 ---
 
 ### Implementation Order — Step-by-Step
 
-#### Step 1: Dependencies
+#### Step 1: Directory setup
 
-Add to `pyproject.toml` dependencies (or install directly):
 ```
-google-ads>=24.0.0
-```
-`anthropic`, `pydantic-ai`, and `python-dotenv` are already available.
-
-Add to `app/.env` (copy from `.env.example`, then add):
-```bash
-# Google Ads
-GOOGLE_ADS_DEVELOPER_TOKEN=
-GOOGLE_ADS_CLIENT_ID=
-GOOGLE_ADS_CLIENT_SECRET=
-GOOGLE_ADS_REFRESH_TOKEN=
-GOOGLE_ADS_CUSTOMER_ID=      # KAP account (digits only)
-GOOGLE_ADS_LOGIN_CUSTOMER_ID= # Manager/MCC account if applicable
-
-# Report config
-CPA_TARGET_USD=500
+app/
+├── data/          ← drop CSVs here (cr_10_04.csv, cr_17_04.csv, cr_24_04.csv)
+├── reports/       ← generated output
+├── schemas/
+├── services/
+├── workflows/
+│   └── google_ads_workflow_nodes/
+└── prompts/
 ```
 
-#### Step 2: Create `app/schemas/google_ads_event_schema.py`
+No new pip dependencies required beyond what the framework already has (`pandas` is available; alternatively use stdlib `csv` module — prefer stdlib `csv` to avoid dependency).
 
-Implement `GoogleAdsReportEvent` exactly as defined above.
-
-#### Step 3: Create `app/schemas/google_ads_models.py`
-
-Implement all four models: `CampaignDayMetrics`, `WoWDeltas`, `ProcessedCampaign`, `SegmentAggregate`.
-
-#### Step 4: Create `app/services/google_ads_service.py`
+#### Step 2: `app/schemas/google_ads_event_schema.py`
 
 ```python
-import os
-from google.ads.googleads.client import GoogleAdsClient
+from pathlib import Path
+from pydantic import BaseModel, Field
 
-class GoogleAdsService:
-    def __init__(self, customer_id: str):
-        self.customer_id = customer_id.replace("-", "")  # normalise
-        credentials = {
-            "developer_token": os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"],
-            "client_id": os.environ["GOOGLE_ADS_CLIENT_ID"],
-            "client_secret": os.environ["GOOGLE_ADS_CLIENT_SECRET"],
-            "refresh_token": os.environ["GOOGLE_ADS_REFRESH_TOKEN"],
-            "use_proto_plus": True,
+class GoogleAdsReportEvent(BaseModel):
+    data_dir: Path = Field(default=Path("app/data"))
+```
+
+#### Step 3: `app/schemas/google_ads_models.py`
+
+Implement all models as defined above.
+
+#### Step 4: `app/services/csv_loader.py`
+
+```python
+import csv
+from datetime import date, datetime
+from pathlib import Path
+
+class CSVLoader:
+    REQUIRED_COLS = {"Campaign", "Budget", "Cost", "Impr.", "Clicks",
+                     "Conv. rate", "Conversions", "Cost / conv.", "Avg. CPC"}
+
+    def load_csvs(self, data_dir: Path) -> dict[str, dict[str, dict]]:
+        csv_files = sorted(data_dir.glob("cr_*.csv"))
+        if len(csv_files) < 3:
+            raise FileNotFoundError(
+                f"Expected 3 CSV files in {data_dir}, found {len(csv_files)}"
+            )
+        # Parse date from each file and sort chronologically
+        dated = [(self._parse_date_from_header(f), f) for f in csv_files]
+        dated.sort(key=lambda x: x[0])
+        oldest_date, oldest_file = dated[0]
+        mid_date,    mid_file    = dated[1]
+        latest_date, latest_file = dated[2]
+
+        return {
+            "oldest":  {"date": oldest_date, "campaigns": self._load_file(oldest_file)},
+            "mid":     {"date": mid_date,    "campaigns": self._load_file(mid_file)},
+            "latest":  {"date": latest_date, "campaigns": self._load_file(latest_file)},
         }
-        login_id = os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
-        if login_id:
-            credentials["login_customer_id"] = login_id.replace("-", "")
-        self.client = GoogleAdsClient.load_from_dict(credentials)
-        self.ga_service = self.client.get_service("GoogleAdsService")
+
+    def _parse_date_from_header(self, path: Path) -> date:
+        with open(path, encoding="utf-8") as f:
+            next(f)  # skip "Campaign report"
+            date_line = next(f).strip().strip('"')
+            # "April 10, 2026 - April 10, 2026" → take first part
+            date_str = date_line.split(" - ")[0]
+            return datetime.strptime(date_str, "%B %d, %Y").date()
+
+    def _load_file(self, path: Path) -> dict[str, dict]:
+        """Returns {campaign_name: cleaned_row} for rows with Cost > 0."""
+        result = {}
+        with open(path, encoding="utf-8") as f:
+            next(f)  # skip "Campaign report"
+            next(f)  # skip date line
+            reader = csv.DictReader(f)
+            for row in reader:
+                name = row.get("Campaign", "").strip()
+                if not name or name.startswith("Total"):
+                    continue
+                cleaned = self._parse_row(row)
+                if cleaned["cost_usd"] > 0:
+                    result[name] = cleaned
+        return result
+
+    def _parse_row(self, row: dict) -> dict:
+        def to_float(val):
+            if not val or val.strip() in ("--", ""):
+                return 0.0
+            return float(val.replace(",", "").replace("%", "").strip())
+
+        cost = to_float(row.get("Cost", "0"))
+        conversions = to_float(row.get("Conversions", "0"))
+        clicks = int(to_float(row.get("Clicks", "0")))
+        impressions = int(to_float(row.get("Impr.", "0")))
+        avg_cpc_raw = row.get("Avg. CPC", "--")
+        avg_cpc = to_float(avg_cpc_raw) if avg_cpc_raw.strip() not in ("--", "0", "") else None
+        budget = to_float(row.get("Budget", "0"))
+
+        # Conv. rate is already a percentage string like "8.81%"
+        cvr_raw = row.get("Conv. rate", "0%")
+        cvr = to_float(cvr_raw) / 100 if cvr_raw.strip() not in ("--", "") else None
+
+        cpa_raw = row.get("Cost / conv.", "--")
+        cpa = to_float(cpa_raw) if cpa_raw.strip() not in ("--", "0", "") and conversions > 0 else None
+
+        return {
+            "cost_usd": cost,
+            "conversions": conversions,
+            "clicks": clicks,
+            "impressions": impressions,
+            "cvr": cvr,
+            "cpa_usd": cpa,
+            "avg_cpc": avg_cpc,
+            "daily_budget_usd": budget,
+        }
 ```
 
-**`fetch_campaigns()` GAQL:**
-```sql
-SELECT campaign.id, campaign.name, campaign.start_date,
-       campaign_budget.amount_micros
-FROM campaign
-WHERE campaign.status = 'ENABLED'
-ORDER BY campaign.name
-```
-Convert `campaign_budget.amount_micros / 1_000_000` to `daily_budget_usd`.
+#### Step 5: Workflow nodes (`app/workflows/google_ads_workflow_nodes/`)
 
-**`fetch_metrics_for_date(target_date)` GAQL:**
-```sql
-SELECT campaign.id,
-       metrics.cost_micros,
-       metrics.conversions,
-       metrics.clicks,
-       metrics.impressions,
-       metrics.search_impression_share
-FROM campaign
-WHERE segments.date = '{target_date}'
-  AND campaign.status = 'ENABLED'
-```
-Note: `search_impression_share` returns a float 0–1 or a sentinel value for `<10%` — treat as `None` if the API returns the sentinel string value.
+Create `__init__.py` (empty).
 
-**`fetch_alltime_avg_impressions(campaigns)` GAQL:**
-```sql
-SELECT campaign.id, metrics.impressions
-FROM campaign
-WHERE campaign.id IN ({comma_separated_ids})
-  AND segments.date BETWEEN '{earliest_start_date}' AND '{yesterday}'
-```
-Aggregate in Python: sum impressions per campaign, divide by number of days in range.
-
-#### Step 5: Create `app/workflows/google_ads_workflow_nodes/`
-
-Create `__init__.py` (empty) in the directory.
-
-**5a. `fetch_campaign_data_node.py`**
+**5a. `load_csv_data_node.py`**
 
 ```python
 from core.nodes.base import Node
 from core.task import TaskContext
-from services.google_ads_service import GoogleAdsService
+from services.csv_loader import CSVLoader
 
-class FetchCampaignDataNode(Node):
+class LoadCSVDataNode(Node):
     async def process(self, task_context: TaskContext) -> TaskContext:
-        event = task_context.event
-        service = GoogleAdsService(event.customer_id)
-
-        campaigns = service.fetch_campaigns()
-        metrics_yesterday = service.fetch_metrics_for_date(str(event.report_date))
-        metrics_last_week = service.fetch_metrics_for_date(str(event.comparison_date))
-        alltime_avg = service.fetch_alltime_avg_impressions(campaigns)
-
-        task_context.update_node(
-            self.node_name,
-            campaigns=campaigns,
-            metrics_yesterday=metrics_yesterday,
-            metrics_last_week=metrics_last_week,
-            alltime_avg_impressions=alltime_avg,
-        )
+        loader = CSVLoader()
+        data = loader.load_csvs(task_context.event.data_dir)
+        task_context.update_node(self.node_name, **data)
         return task_context
+```
+
+Stores in task_context:
+```python
+{
+  "oldest":  {"date": date(2026,4,10), "campaigns": {name: row_dict}},
+  "mid":     {"date": date(2026,4,17), "campaigns": {name: row_dict}},
+  "latest":  {"date": date(2026,4,24), "campaigns": {name: row_dict}},
+}
 ```
 
 **5b. `classify_and_process_node.py`**
@@ -323,28 +372,42 @@ from schemas.google_ads_models import (
 
 class ClassifyAndProcessNode(Node):
     async def process(self, task_context: TaskContext) -> TaskContext:
-        data = task_context.nodes["FetchCampaignDataNode"]
-        campaigns = data["campaigns"]
-        m_yday = data["metrics_yesterday"]
-        m_lweek = data["metrics_last_week"]
-        alltime_avg = data["alltime_avg_impressions"]
+        raw = task_context.nodes["LoadCSVDataNode"]
+
+        oldest_campaigns = raw["oldest"]["campaigns"]
+        mid_campaigns    = raw["mid"]["campaigns"]
+        latest_campaigns = raw["latest"]["campaigns"]
+
+        # Union of all campaign names that appear in any file
+        all_names = set(oldest_campaigns) | set(mid_campaigns) | set(latest_campaigns)
 
         wl, nonwl = [], []
-        for c in campaigns:
-            segment = "WL" if "weight" in c["name"].lower() else "NON_WL"
-            yesterday = _build_metrics(m_yday.get(c["id"], {}))
-            last_week = _build_metrics(m_lweek.get(c["id"], {}))
-            deltas = _compute_deltas(yesterday, last_week)
+        for name in sorted(all_names):
+            segment = "WL" if "weight" in name.lower() else "NON_WL"
+            oldest  = _build_metrics(oldest_campaigns.get(name, {}))
+            mid     = _build_metrics(mid_campaigns.get(name, {}))
+            latest  = _build_metrics(latest_campaigns.get(name, {}))
+            budget  = (
+                latest_campaigns.get(name, {})
+                or mid_campaigns.get(name, {})
+                or oldest_campaigns.get(name, {})
+            ).get("daily_budget_usd", 0.0)
+
             pc = ProcessedCampaign(
-                id=c["id"], name=c["name"], segment=segment,
-                daily_budget_usd=c["daily_budget_usd"],
-                alltime_avg_impressions=alltime_avg.get(c["id"], 0.0),
-                yesterday=yesterday, last_week=last_week, wow_deltas=deltas,
+                name=name, segment=segment, daily_budget_usd=budget,
+                date_oldest=oldest, date_mid=mid, date_latest=latest,
+                wow1=_compute_deltas(oldest, mid),
+                wow2=_compute_deltas(mid, latest),
             )
             (wl if segment == "WL" else nonwl).append(pc)
 
         task_context.update_node(
             self.node_name,
+            dates={
+                "oldest": str(raw["oldest"]["date"]),
+                "mid":    str(raw["mid"]["date"]),
+                "latest": str(raw["latest"]["date"]),
+            },
             wl_campaigns=[c.model_dump() for c in wl],
             nonwl_campaigns=[c.model_dump() for c in nonwl],
             wl_aggregates=_build_aggregate("WL", wl).model_dump(),
@@ -353,29 +416,101 @@ class ClassifyAndProcessNode(Node):
         return task_context
 ```
 
-Helper functions (private, in same file):
-- `_build_metrics(raw: dict) -> CampaignDayMetrics` — converts micros to USD, computes CTR/CVR/CPA, handles None
-- `_compute_deltas(yday: CampaignDayMetrics, lweek: CampaignDayMetrics) -> WoWDeltas` — computes (abs, pct) for each metric
-- `_build_aggregate(segment, campaigns: list[ProcessedCampaign]) -> SegmentAggregate` — sums totals, computes blended metrics
+**Helper functions** (private, same file):
 
-**Key logic for `_compute_deltas`:**
 ```python
-def _delta(a: Optional[float], b: Optional[float]) -> Delta:
+def _build_metrics(raw: dict) -> CampaignDayMetrics:
+    cost = raw.get("cost_usd", 0.0)
+    conv = raw.get("conversions", 0.0)
+    clicks = raw.get("clicks", 0)
+    impr = raw.get("impressions", 0)
+    return CampaignDayMetrics(
+        cost_usd=cost,
+        conversions=conv,
+        clicks=clicks,
+        impressions=impr,
+        ctr=clicks / impr if impr > 0 else None,
+        cvr=conv / clicks if clicks > 0 else None,
+        cpa_usd=cost / conv if conv > 0 else None,
+        avg_cpc=raw.get("avg_cpc"),
+    )
+
+def _delta(a, b) -> tuple:
+    """Compute (abs_delta, pct_delta). Both None if either input is None."""
     if a is None or b is None:
         return (None, None)
-    abs_d = a - b
-    pct_d = (abs_d / b * 100) if b != 0 else None
-    return (round(abs_d, 4), round(pct_d, 2) if pct_d is not None else None)
+    abs_d = round(a - b, 4)
+    pct_d = round((abs_d / b) * 100, 2) if b != 0 else None
+    return (abs_d, pct_d)
+
+def _compute_deltas(from_: CampaignDayMetrics, to_: CampaignDayMetrics) -> WoWDeltas:
+    return WoWDeltas(
+        cost_usd=_delta(to_.cost_usd, from_.cost_usd),
+        conversions=_delta(to_.conversions, from_.conversions),
+        clicks=_delta(to_.clicks, from_.clicks),
+        impressions=_delta(to_.impressions, from_.impressions),
+        ctr=_delta(to_.ctr, from_.ctr),
+        cvr=_delta(to_.cvr, from_.cvr),
+        cpa_usd=_delta(to_.cpa_usd, from_.cpa_usd),
+    )
+
+def _build_aggregate(segment: str, campaigns: list) -> SegmentAggregate:
+    def total(field, period):
+        return sum(getattr(getattr(c, period), field) or 0 for c in campaigns)
+
+    def blended_cpa(period):
+        cost = total("cost_usd", period)
+        conv = total("conversions", period)
+        return cost / conv if conv > 0 else None
+
+    def avg_cvr(period):
+        conv = total("conversions", period)
+        clicks = total("clicks", period)
+        return conv / clicks if clicks > 0 else None
+
+    def avg_ctr(period):
+        clicks = total("clicks", period)
+        impr = total("impressions", period)
+        return clicks / impr if impr > 0 else None
+
+    # Build aggregate metrics objects for delta computation
+    agg_oldest = CampaignDayMetrics(
+        cost_usd=total("cost_usd","date_oldest"), conversions=total("conversions","date_oldest"),
+        clicks=int(total("clicks","date_oldest")), impressions=int(total("impressions","date_oldest")),
+        ctr=avg_ctr("date_oldest"), cvr=avg_cvr("date_oldest"), cpa_usd=blended_cpa("date_oldest"), avg_cpc=None,
+    )
+    agg_mid = CampaignDayMetrics(
+        cost_usd=total("cost_usd","date_mid"), conversions=total("conversions","date_mid"),
+        clicks=int(total("clicks","date_mid")), impressions=int(total("impressions","date_mid")),
+        ctr=avg_ctr("date_mid"), cvr=avg_cvr("date_mid"), cpa_usd=blended_cpa("date_mid"), avg_cpc=None,
+    )
+    agg_latest = CampaignDayMetrics(
+        cost_usd=total("cost_usd","date_latest"), conversions=total("conversions","date_latest"),
+        clicks=int(total("clicks","date_latest")), impressions=int(total("impressions","date_latest")),
+        ctr=avg_ctr("date_latest"), cvr=avg_cvr("date_latest"), cpa_usd=blended_cpa("date_latest"), avg_cpc=None,
+    )
+
+    return SegmentAggregate(
+        segment=segment, campaign_count=len(campaigns),
+        total_cost_oldest=agg_oldest.cost_usd, total_cost_mid=agg_mid.cost_usd, total_cost_latest=agg_latest.cost_usd,
+        total_conversions_oldest=agg_oldest.conversions, total_conversions_mid=agg_mid.conversions, total_conversions_latest=agg_latest.conversions,
+        total_clicks_oldest=agg_oldest.clicks, total_clicks_mid=agg_mid.clicks, total_clicks_latest=agg_latest.clicks,
+        total_impressions_oldest=agg_oldest.impressions, total_impressions_mid=agg_mid.impressions, total_impressions_latest=agg_latest.impressions,
+        blended_cpa_oldest=blended_cpa("date_oldest"), blended_cpa_mid=blended_cpa("date_mid"), blended_cpa_latest=blended_cpa("date_latest"),
+        avg_cvr_oldest=avg_cvr("date_oldest"), avg_cvr_mid=avg_cvr("date_mid"), avg_cvr_latest=avg_cvr("date_latest"),
+        avg_ctr_oldest=avg_ctr("date_oldest"), avg_ctr_mid=avg_ctr("date_mid"), avg_ctr_latest=avg_ctr("date_latest"),
+        wow1=_compute_deltas(agg_oldest, agg_mid),
+        wow2=_compute_deltas(agg_mid, agg_latest),
+    )
 ```
 
 **5c. `generate_wl_report_node.py`**
 
 ```python
-import os
-import json
+import json, os
+from pydantic import BaseModel
 from core.nodes.agent import AgentNode, AgentConfig, ModelProvider
 from core.task import TaskContext
-from pydantic import BaseModel
 from services.prompt_loader import PromptManager
 
 class GenerateWLReportNode(AgentNode):
@@ -395,49 +530,18 @@ class GenerateWLReportNode(AgentNode):
 
     async def process(self, task_context: TaskContext) -> TaskContext:
         data = task_context.nodes["ClassifyAndProcessNode"]
-        user_prompt = _format_report_prompt(
+        user_prompt = _format_prompt(
             segment="Weight Loss (WL)",
             campaigns=data["wl_campaigns"],
             aggregates=data["wl_aggregates"],
-            report_date=str(task_context.event.report_date),
-            comparison_date=str(task_context.event.comparison_date),
-        )
-        result = await self.agent.run(user_prompt)
-        task_context.update_node(
-            self.node_name,
-            report_markdown=result.output.report_markdown,
-        )
-        return task_context
-```
-
-`_format_report_prompt(segment, campaigns, aggregates, report_date, comparison_date) -> str`:
-Returns a structured JSON/text block with all campaign data formatted for Claude to consume.
-
-**5d. `generate_nonwl_report_node.py`**
-
-Identical structure to `GenerateWLReportNode`. Uses `nonwl_campaigns` and `nonwl_aggregates`. Segment label: `"Non-Weight Loss (Non-WL)"`.
-
-```python
-class GenerateNonWLReportNode(AgentNode):
-    class OutputType(BaseModel):
-        report_markdown: str
-
-    def get_agent_config(self) -> AgentConfig:
-        # identical to WL version
-        ...
-
-    async def process(self, task_context: TaskContext) -> TaskContext:
-        data = task_context.nodes["ClassifyAndProcessNode"]
-        user_prompt = _format_report_prompt(
-            segment="Non-Weight Loss (Non-WL)",
-            campaigns=data["nonwl_campaigns"],
-            aggregates=data["nonwl_aggregates"],
-            ...
+            dates=data["dates"],
         )
         result = await self.agent.run(user_prompt)
         task_context.update_node(self.node_name, report_markdown=result.output.report_markdown)
         return task_context
 ```
+
+**5d. `generate_nonwl_report_node.py`** — identical to WL node, uses `nonwl_campaigns`/`nonwl_aggregates`, segment label `"Non-Weight Loss (Non-WL)"`.
 
 **5e. `write_reports_node.py`**
 
@@ -448,38 +552,28 @@ from core.task import TaskContext
 
 class WriteReportsNode(Node):
     async def process(self, task_context: TaskContext) -> TaskContext:
-        reports_dir = Path(__file__).parent.parent.parent / "reports"
+        reports_dir = Path("app/reports")
         reports_dir.mkdir(exist_ok=True)
-        date_str = str(task_context.event.report_date)
+        latest_date = task_context.nodes["ClassifyAndProcessNode"]["dates"]["latest"]
 
-        wl_path = reports_dir / f"report_wl_{date_str}.md"
-        nonwl_path = reports_dir / f"report_nonwl_{date_str}.md"
+        wl_path    = reports_dir / f"report_wl_{latest_date}.md"
+        nonwl_path = reports_dir / f"report_nonwl_{latest_date}.md"
 
-        wl_md = task_context.nodes["GenerateWLReportNode"]["report_markdown"]
-        nonwl_md = task_context.nodes["GenerateNonWLReportNode"]["report_markdown"]
+        wl_path.write_text(task_context.nodes["GenerateWLReportNode"]["report_markdown"], encoding="utf-8")
+        nonwl_path.write_text(task_context.nodes["GenerateNonWLReportNode"]["report_markdown"], encoding="utf-8")
 
-        wl_path.write_text(wl_md, encoding="utf-8")
-        nonwl_path.write_text(nonwl_md, encoding="utf-8")
-
-        print(f"\nReports written:")
-        print(f"  {wl_path}")
-        print(f"  {nonwl_path}")
-
-        task_context.update_node(
-            self.node_name,
-            wl_path=str(wl_path),
-            nonwl_path=str(nonwl_path),
-        )
+        print(f"\nReports written:\n  {wl_path}\n  {nonwl_path}")
+        task_context.update_node(self.node_name, wl_path=str(wl_path), nonwl_path=str(nonwl_path))
         return task_context
 ```
 
-#### Step 6: Create `app/workflows/google_ads_workflow.py`
+#### Step 6: `app/workflows/google_ads_workflow.py`
 
 ```python
 from core.schema import WorkflowSchema, NodeConfig
 from core.workflow import Workflow
 from schemas.google_ads_event_schema import GoogleAdsReportEvent
-from workflows.google_ads_workflow_nodes.fetch_campaign_data_node import FetchCampaignDataNode
+from workflows.google_ads_workflow_nodes.load_csv_data_node import LoadCSVDataNode
 from workflows.google_ads_workflow_nodes.classify_and_process_node import ClassifyAndProcessNode
 from workflows.google_ads_workflow_nodes.generate_wl_report_node import GenerateWLReportNode
 from workflows.google_ads_workflow_nodes.generate_nonwl_report_node import GenerateNonWLReportNode
@@ -487,24 +581,23 @@ from workflows.google_ads_workflow_nodes.write_reports_node import WriteReportsN
 
 class GoogleAdsWorkflow(Workflow):
     workflow_schema = WorkflowSchema(
-        description="Daily Google Ads performance report generator — WL and Non-WL segments",
+        description="Daily Google Ads performance report from CSV exports",
         event_schema=GoogleAdsReportEvent,
-        start=FetchCampaignDataNode,
+        start=LoadCSVDataNode,
         nodes=[
-            NodeConfig(node=FetchCampaignDataNode,    connections=[ClassifyAndProcessNode],   description="Fetches raw campaign data from Google Ads API"),
-            NodeConfig(node=ClassifyAndProcessNode,    connections=[GenerateWLReportNode],     description="Segments campaigns and computes all metrics"),
-            NodeConfig(node=GenerateWLReportNode,      connections=[GenerateNonWLReportNode],  description="Generates WL report via Claude"),
-            NodeConfig(node=GenerateNonWLReportNode,   connections=[WriteReportsNode],         description="Generates Non-WL report via Claude"),
-            NodeConfig(node=WriteReportsNode,          connections=[],                         description="Writes both reports to app/reports/"),
+            NodeConfig(node=LoadCSVDataNode,          connections=[ClassifyAndProcessNode]),
+            NodeConfig(node=ClassifyAndProcessNode,    connections=[GenerateWLReportNode]),
+            NodeConfig(node=GenerateWLReportNode,      connections=[GenerateNonWLReportNode]),
+            NodeConfig(node=GenerateNonWLReportNode,   connections=[WriteReportsNode]),
+            NodeConfig(node=WriteReportsNode,          connections=[]),
         ],
     )
 ```
 
 #### Step 7: Register in WorkflowRegistry
 
-**Update `app/workflows/workflow_registry.py`:**
-
 ```python
+# app/workflows/workflow_registry.py
 from enum import Enum
 from workflows.example_streaming_workflow import ExampleStreamingWorkflow
 from workflows.google_ads_workflow import GoogleAdsWorkflow
@@ -514,60 +607,61 @@ class WorkflowRegistry(Enum):
     GOOGLE_ADS_REPORT = GoogleAdsWorkflow
 ```
 
-#### Step 8: Create `app/prompts/report_generation.j2`
+#### Step 8: `app/prompts/report_generation.j2`
 
 ```jinja2
 ---
-description: System prompt for Google Ads daily performance report generation
+description: System prompt for Google Ads daily performance report
 author: Google Ads Assistant
 ---
 
-You are an expert Google Ads performance analyst generating a daily campaign performance report.
+You are an expert Google Ads performance analyst. Generate a complete Markdown report for the campaign segment provided.
 
-Your task is to analyse the campaign data provided and generate a complete Markdown report with exactly three sections:
+The data covers THREE dates with TWO week-over-week comparison periods:
+- Period 1 (WoW 1): Change from the oldest date to the middle date
+- Period 2 (WoW 2): Change from the middle date to the most recent date
 
-## Report Structure
+CPA target: ${{ cpa_target }}. Lower CPA = better. Higher conversions = better.
+
+## Required Report Structure
 
 ### 1. Executive Summary
-Write a concise 2–4 sentence narrative covering:
-- Overall segment performance for the day
-- The most significant trend or signal
-- How performance compares to the ${{ cpa_target }} CPA target
+2–4 sentence narrative: overall trend across both periods, most significant signal, performance vs ${{ cpa_target }} CPA target.
 
-Then output a **Key Metrics** table showing aggregate metrics with WoW deltas using ↑/↓ indicators.
+Then output a **Key Metrics** table:
+| Metric | Date 1 (oldest) | Date 2 (mid) | Date 3 (latest) | WoW 1 Δ | WoW 2 Δ |
+Use ↑/↓ for direction. Format: ↑+12.5% or ↓-8.3%
 
 ### 2. Campaign Breakdown
-For each campaign, output a metrics table with: Spend, Conversions, CPA, CVR, CTR, Impressions, Impression Share, Daily Budget, All-Time Avg Impressions.
-Use `N/A` for any metric that cannot be calculated (zero denominator).
-Use `—` for any WoW delta that cannot be calculated (zero baseline).
+For each campaign, a metrics table with the same three-date + two-delta structure.
+Use `N/A` for uncalculable metrics (zero denominator).
+Use `—` for uncalculable deltas (zero baseline).
+Metrics per campaign: Spend, Conversions, CPA, CVR, CTR, Impressions, Avg CPC, Daily Budget.
 
 ### 3. PPP Analysis
-Label this section clearly as AI-generated suggestions. Structure it as:
+> ⚠️ AI-generated suggestions. No automated actions taken. Human review required.
 
-**Progress** — What is performing well. Reference specific campaigns and metrics.
-**Problems** — What needs attention. Flag campaigns with CPA above ${{ cpa_target }}, significant impression drops, or declining CTR.
-**Priorities** — Ranked list of specific, actionable recommendations. Reference campaign names. Never suggest automated actions — recommendations only.
+**Progress** — Campaigns/metrics trending positively across both periods.
+**Problems** — Campaigns with CPA above ${{ cpa_target }}, declining conversions, or worsening CTR.
+**Priorities** — Ranked, specific, actionable recommendations. Name the campaign. No automated actions.
 
-## Formatting Rules
-- Use Markdown headers (##, ###)
-- Monetary values: prefix with $ and round to 2 decimal places
-- Percentages: round to 2 decimal places with % suffix
-- WoW deltas: show as ↑+X% or ↓-X% (green framing for positive signals, flag negative signals)
-- CPA above ${{ cpa_target }} is underperforming — flag it
-- Lower CPA = better; higher conversions = better; higher impression share = better
+## Formatting
+- $ prefix for monetary values, 2 decimal places
+- % suffix for rates, 2 decimal places
+- Use campaign names exactly as provided
 ```
 
-#### Step 9: Create `app/run_report.py`
+#### Step 9: `app/run_report.py`
 
 ```python
 import argparse
-import os
 import sys
-from datetime import date, timedelta
-
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path="app/.env")
+
+sys.path.insert(0, "app")
 
 from schemas.google_ads_event_schema import GoogleAdsReportEvent
 from workflows.google_ads_workflow import GoogleAdsWorkflow
@@ -576,33 +670,21 @@ from workflows.google_ads_workflow import GoogleAdsWorkflow
 def main():
     parser = argparse.ArgumentParser(description="Google Ads Daily Report Generator")
     parser.add_argument(
-        "--customer-id",
-        default=os.getenv("GOOGLE_ADS_CUSTOMER_ID"),
-        help="Google Ads Customer ID (overrides env var)",
-    )
-    parser.add_argument(
-        "--date",
-        default=None,
-        help="Report date YYYY-MM-DD (default: yesterday)",
+        "--data-dir",
+        default="app/data",
+        help="Directory containing CSV files (default: app/data)",
     )
     args = parser.parse_args()
 
-    if not args.customer_id:
-        print("Error: GOOGLE_ADS_CUSTOMER_ID not set. Use --customer-id or set env var.")
+    data_dir = Path(args.data_dir)
+    if not data_dir.exists():
+        print(f"Error: data directory '{data_dir}' does not exist.")
         sys.exit(1)
 
-    report_date = (
-        date.fromisoformat(args.date) if args.date else date.today() - timedelta(days=1)
-    )
+    event = GoogleAdsReportEvent(data_dir=data_dir)
 
-    event = GoogleAdsReportEvent(
-        customer_id=args.customer_id,
-        report_date=report_date,
-    )
-
-    print(f"Google Ads Assistant — Report for {report_date}")
-    print(f"Account: {args.customer_id}")
-    print(f"Comparison date: {event.comparison_date}")
+    print("Google Ads Assistant — Report Generator")
+    print(f"Reading CSVs from: {data_dir}")
     print("─" * 50)
 
     workflow = GoogleAdsWorkflow()
@@ -610,8 +692,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # Run from project root: python app/run_report.py
-    sys.path.insert(0, "app")
     main()
 ```
 
@@ -619,57 +699,35 @@ if __name__ == "__main__":
 
 ### Key Algorithms & Logic
 
-**Metric derivation (in `_build_metrics`):**
+**CSV date parsing:**
 ```
-cost_usd = raw.get("cost_micros", 0) / 1_000_000
-conversions = float(raw.get("conversions", 0))
-clicks = int(raw.get("clicks", 0))
-impressions = int(raw.get("impressions", 0))
-impression_share = raw.get("search_impression_share")  # None if sentinel or missing
-
-ctr = clicks / impressions if impressions > 0 else None
-cvr = conversions / clicks if clicks > 0 else None
-cpa_usd = cost_usd / conversions if conversions > 0 else None
+open file → skip row 1 → read row 2
+strip quotes → split on " - " → take first part
+parse with strptime("%B %d, %Y") → date object
+sort files by parsed date → assign oldest/mid/latest
 ```
 
-**Segment aggregate (in `_build_aggregate`):**
-```
-total_cost = sum(c.yesterday.cost_usd for c in campaigns)
-total_conversions = sum(c.yesterday.conversions for c in campaigns)
-total_clicks = sum(c.yesterday.clicks for c in campaigns)
-total_impressions = sum(c.yesterday.impressions for c in campaigns)
-
-blended_cpa = total_cost / total_conversions if total_conversions > 0 else None
-avg_cvr = total_conversions / total_clicks if total_clicks > 0 else None
-avg_ctr = total_clicks / total_impressions if total_impressions > 0 else None
-avg_impression_share = mean of non-None impression_share values, or None
-
-wow_deltas = _compute_deltas(
-    aggregate_yesterday_metrics,
-    aggregate_last_week_metrics   # re-compute from last_week fields
-)
-```
-
-**User prompt formatting (in `_format_report_prompt`):**
-
-Produce a structured text block Claude can read without ambiguity:
+**User prompt for AI (in `_format_prompt`):**
 ```
 SEGMENT: {segment}
-REPORT DATE: {report_date}
-COMPARISON DATE: {comparison_date}
+DATES: oldest={dates.oldest}, mid={dates.mid}, latest={dates.latest}
 
 === SEGMENT AGGREGATES ===
-Yesterday: total_spend=$X, conversions=N, blended_CPA=$X, avg_CTR=X%, avg_CVR=X%, total_impressions=N, avg_impression_share=X%
-Last week: [same fields]
-WoW: [deltas]
+{dates.oldest}: spend=${total_cost_oldest}, conv={total_conversions_oldest}, CPA=${blended_cpa_oldest}/N/A, CVR={avg_cvr_oldest*100:.2f}%/N/A, CTR={avg_ctr_oldest*100:.2f}%/N/A, impressions={total_impressions_oldest}
+{dates.mid}:    [same]
+{dates.latest}: [same]
+WoW 1 ({dates.oldest}→{dates.mid}): spend Δ={wow1.cost_usd}, conv Δ={wow1.conversions}, CPA Δ={wow1.cpa_usd}, ...
+WoW 2 ({dates.mid}→{dates.latest}): [same structure]
 
-=== CAMPAIGNS ===
-[For each campaign:]
+=== CAMPAIGNS ({campaign_count} total) ===
 Campaign: {name}
-  Budget/day: $X | All-time avg impressions: N
-  Yesterday: spend=$X, conv=N, CPA=$X/N/A, CVR=X%/N/A, CTR=X%/N/A, impressions=N, imp_share=X%/N/A
-  Last week: [same]
-  WoW: [deltas]
+  Budget: ${daily_budget_usd}/day
+  {dates.oldest}: spend=${cost_oldest}, conv={conv_oldest}, CPA=${cpa_oldest}/N/A, CVR={cvr_oldest}/N/A, CTR={ctr_oldest}/N/A, impressions={impr_oldest}, avg_cpc=${avg_cpc_oldest}/N/A
+  {dates.mid}:    [same]
+  {dates.latest}: [same]
+  WoW 1: [deltas]
+  WoW 2: [deltas]
+[repeat for each campaign]
 ```
 
 ---
@@ -678,96 +736,75 @@ Campaign: {name}
 
 | Scenario | Behaviour |
 |---|---|
-| Missing required env var | `sys.exit(1)` with named variable in error message (checked in `run_report.py` before workflow start) |
-| `GOOGLE_ADS_CUSTOMER_ID` not set | Error printed, exit code 1 |
-| Google Ads API auth failure | `GoogleAdsException` propagates with API error detail; workflow halts |
-| No campaigns returned | Print warning "No active campaigns found" and exit cleanly |
-| Campaign has zero impressions on a date | `fetch_metrics_for_date` returns empty dict for that campaign; `_build_metrics({})` returns all-zero/None metrics |
-| `search_impression_share` sentinel value (`"< 10%"`) | Treat as `None` in `_build_metrics` |
-| Zero-denominator in metric calc | All derived metrics (CPA, CVR, CTR) return `None` |
-| Zero-denominator in WoW delta % | `pct_delta = None`, rendered as `—` in report |
-| Claude API failure | Exception propagates from `AgentNode.process()`; workflow halts with error |
-| `app/reports/` directory doesn't exist | `Path.mkdir(exist_ok=True)` creates it |
+| `app/data/` missing or <3 CSVs | `FileNotFoundError` raised in `LoadCSVDataNode`; workflow halts with message |
+| CSV missing required columns | `KeyError` with column name; workflow halts |
+| All campaigns have 0 cost in a file | Empty campaign dict; all metrics will be 0/None; report generates with N/A |
+| Campaign in `latest` but not in `oldest`/`mid` | Missing periods default to `_build_metrics({})` → all zeros/None |
+| Zero denominator in metric calc | Return `None`; render as `N/A` in report |
+| Zero baseline in WoW delta | `pct_delta = None`; render as `—` |
+| Claude API failure | Exception propagates; workflow halts before files written |
+| `app/reports/` missing | `Path.mkdir(exist_ok=True)` creates it automatically |
 
 ---
 
 ## Testing Requirements
 
-### Critical Test Cases (E2E — PoC)
+### E2E Test (PoC acceptance)
 
 ```
-Scenario: Full pipeline run with real credentials
-  Given: app/.env contains valid Google Ads and Anthropic credentials
-  When:  python app/run_report.py
-  Then:
-    - Exit code 0
-    - app/reports/report_wl_{yesterday}.md exists and is non-empty
-    - app/reports/report_nonwl_{yesterday}.md exists and is non-empty
-    - WL report contains section headers: "Executive Summary", "Campaign Breakdown", "PPP Analysis"
-    - Non-WL report contains same section headers
-    - No campaign names containing "weight" appear in the Non-WL report
-    - No campaign names NOT containing "weight" appear in the WL report
+Given: app/data/ contains cr_10_04.csv, cr_17_04.csv, cr_24_04.csv
+When:  python app/run_report.py
+Then:
+  - Exit code 0
+  - app/reports/report_wl_2026-04-24.md exists and is non-empty
+  - app/reports/report_nonwl_2026-04-24.md exists and is non-empty
+  - WL report: every campaign name contains "weight" (case-insensitive)
+  - Non-WL report: no campaign name contains "weight"
+  - Both reports have sections: "Executive Summary", "Campaign Breakdown", "PPP Analysis"
+  - Both reports show 3 date columns and 2 WoW delta columns in tables
+  - Spend figures match CSV totals for each date
 ```
 
-### Edge Cases to Consider
+### Edge Cases
 
-- **Campaign with zero spend on report date** — should appear in breakdown with $0.00 and N/A for CPA/CVR
-- **Campaign with zero spend on comparison date** — WoW deltas for spend show absolute delta only, pct delta = `—`
-- **All campaigns in one segment** — the other segment report is generated with 0 campaigns; PPP notes no campaigns active
-- **`impression_share` below 10% threshold** — API returns sentinel; store as `None`, render as `N/A`
-- **`--date` flag with a date that has no data** — all metrics are 0/None; report still generates with `N/A` throughout
+- **Campaign appears in Apr 24 but not Apr 10 or 17** → prior periods show 0/N/A
+- **Campaign appears in Apr 10 and 17 but has 0 cost on Apr 24** → excluded (Cost filter on each file)
+- **`--data-dir` override** → `python app/run_report.py --data-dir /tmp/test_data` reads from that path
 
 ---
 
 ## Dependencies & Constraints
 
-### External Dependencies
-
 ```
-google-ads>=24.0.0          # Official Google Ads Python client
-python-dotenv>=1.0.0        # Already present in framework
-pydantic-ai                 # Already present in framework
-anthropic                   # Already present in framework
-python-frontmatter          # Already present (used by PromptManager)
-jinja2                      # Already present (used by PromptManager)
+# No new dependencies required
+# stdlib csv module used for CSV parsing
+# anthropic, pydantic-ai, python-dotenv already in framework
 ```
 
-### Required Google Ads API Credentials
-
-| Credential | Where to obtain |
-|---|---|
-| `GOOGLE_ADS_DEVELOPER_TOKEN` | Google Ads → Tools → API Center |
-| `GOOGLE_ADS_CLIENT_ID` | Google Cloud Console → OAuth 2.0 Client |
-| `GOOGLE_ADS_CLIENT_SECRET` | Google Cloud Console → OAuth 2.0 Client |
-| `GOOGLE_ADS_REFRESH_TOKEN` | Run OAuth2 flow (google-auth-oauthlib or oauth2l) |
-| `GOOGLE_ADS_CUSTOMER_ID` | Google Ads → Account ID (top-right, remove dashes) |
-| `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | Manager account ID (only if using MCC) |
+**Required `.env` variables** (much simpler than before — only AI key needed):
+```bash
+ANTHROPIC_API_KEY=...
+CPA_TARGET_USD=500
+```
 
 ### Constraints & Assumptions
 
-- Run from project root: `python app/run_report.py` (not from `app/`)
-- `sys.path.insert(0, "app")` in `run_report.py` enables absolute imports
-- `GOOGLE_ADS_CUSTOMER_ID` digits only — dashes stripped automatically in `GoogleAdsService.__init__`
-- `search_impression_share` requires the account to be on Search campaigns; may not apply to all campaign types
-- `workflow.run(event)` is synchronous — appropriate for CLI invocation
-- `AgentConfig.instructions` is the system prompt — set once at agent init; campaign data goes in the user prompt passed to `agent.run()`
-- `PromptManager` resolves templates relative to `app/prompts/` — ensure `run_report.py` is executed with `app/` on the path
-- The `LANGFUSE_*` env vars are optional — `AgentNode` instruments by default but gracefully skips if keys missing
-
----
+- `app/run_report.py` run from project root; `sys.path.insert(0, "app")` enables absolute imports
+- Exactly 3 CSVs expected in `app/data/`; naming must match `cr_*.csv` glob
+- CSV date extracted from row 2 (format: `"Month DD, YYYY - Month DD, YYYY"`)
+- Campaigns with `Cost == 0` on a given date are excluded from that date's analysis
+- WL classification: `"weight" in campaign_name.lower()` — relies on naming convention
+- `workflow.run(event)` is synchronous — appropriate for CLI
+- `AgentConfig.instructions` = static system prompt (set at agent init); campaign data goes in `agent.run(user_prompt)`
 
 ## Open Questions
 
-All resolved. No open questions remain for PoC implementation.
+None — fully resolved for PoC.
 
----
+## Assumptions
 
-## Assumptions Documented
-
-1. `workflow.run(event)` accepts a Pydantic model instance directly (confirmed from framework source)
-2. `agent.run(user_prompt)` returns a `RunResult` — output accessed via `result.output.report_markdown`
-3. `google-ads` client accepts a plain dict via `GoogleAdsClient.load_from_dict()`
-4. `search_impression_share` is the correct GAQL field name for impression share on Search campaigns
-5. All 13 KAP campaigns are `ENABLED` status — removed/paused campaigns are excluded by the `WHERE campaign.status = 'ENABLED'` filter
-6. Jinja2 template variable syntax `{{ cpa_target }}` works in `.j2` files loaded by `PromptManager`
-7. `CPA_TARGET_USD` defaults to `"500"` if not set in `.env`
+1. All three CSVs are for the same account and use the same column structure
+2. The `cr_DD_MM.csv` filename pattern holds; date from row 2 is the authoritative sort key
+3. `workflow.run(event)` accepts a Pydantic model instance directly
+4. `result.output.report_markdown` accesses Claude's typed output
+5. `PromptManager.get_prompt()` resolves templates relative to `app/prompts/` when run from project root with `app/` on sys.path
