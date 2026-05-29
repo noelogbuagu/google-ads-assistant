@@ -1,23 +1,22 @@
+import os
 import sys
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
-sys.path.append(str(project_root / "app"))
-sys.path.append(str(project_root))
+sys.path.insert(0, str(project_root / "app"))
+sys.path.insert(0, str(project_root))
 
-from core.workflow import Workflow
+from dotenv import load_dotenv
+load_dotenv(project_root / "app" / ".env")
+
 from playground.utils.visualize_workflow import visualize_workflow
-from workflows.placeholder_workflow import PlaceholderWorkflow
+from workflows.google_ads_report_workflow import GoogleAdsReportWorkflow
 
-"""
-This playground is used to visualize the workflows.
-"""
+output_path = Path(__file__).parent / "outputs" / "workflow.png"
+output_path.parent.mkdir(exist_ok=True)
 
+image = visualize_workflow(GoogleAdsReportWorkflow())
+with open(output_path, "wb") as f:
+    f.write(image.data)
 
-def generate(workflow: Workflow):
-    image = visualize_workflow(workflow)
-    with open("workflow.png", "wb") as f:
-        f.write(image.data)
-
-
-generate(PlaceholderWorkflow())
+print(f"Saved to {output_path}")
