@@ -37,6 +37,11 @@ def _delta_pct(a, b):
     return None
 
 
+def _display_name(campaign: str) -> str:
+    """Replace pipe separators with › so campaign names don't break markdown tables."""
+    return campaign.replace(" | ", " › ")
+
+
 def _build_report(p: dict, n: dict) -> str:
     snap = p["account_snapshot"]
     campaigns = p["campaign_rows"]
@@ -83,8 +88,9 @@ def _build_report(p: dict, n: dict) -> str:
         flag = "🔴 " if r["anomaly_severity"] == "critical" else ("🟡 " if r["anomaly_severity"] == "warning" else "")
         suffix = " *(no spend)*" if not r["has_spend"] else ""
         roas_str = f"{r['roas']:.2f}" if r["roas"] else "—"
+        name = _display_name(r["campaign"])
         lines.append(
-            f"| {flag}{r['campaign']}{suffix} "
+            f"| {flag}{name}{suffix} "
             f"| {_fmt_gbp(r['cost'])} | {_fmt_delta(r['cost_delta_pct'])} "
             f"| {r['new_orders']} | {_fmt_delta(r['new_orders_delta_pct'])} "
             f"| {_fmt_gbp(r['cpa'])} | {_fmt_delta(r['cpa_delta_pct'])} "
@@ -114,13 +120,28 @@ def _build_report(p: dict, n: dict) -> str:
     return "\n".join(lines)
 
 
+def _adaptive_card(text: str) -> dict:
+    return {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.5",
+        "body": [
+            {
+                "type": "TextBlock",
+                "text": text,
+                "wrap": True,
+            }
+        ],
+    }
+
+
 async def _post_to_teams(message: str) -> None:
-    """POST message to Teams via Power Automate webhook, with one retry."""
+    """POST message to Teams via Power Automate webhook as an Adaptive Card, with one retry."""
     chunks = [message[i : i + _MAX_CHARS] for i in range(0, len(message), _MAX_CHARS)]
 
     async with httpx.AsyncClient(timeout=30) as client:
         for i, chunk in enumerate(chunks):
-            payload = {"text": chunk}
+            payload = _adaptive_card(chunk)
             for attempt in range(2):
                 try:
                     resp = await client.post(TEAMS_WEBHOOK_URL, json=payload)
