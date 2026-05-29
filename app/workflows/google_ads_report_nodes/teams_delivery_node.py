@@ -1,7 +1,15 @@
+import asyncio
+import os
 from datetime import datetime
+
+import httpx
 
 from core.nodes.base import Node
 from core.task import TaskContext
+
+TEAMS_WEBHOOK_URL = os.environ.get("TEAMS_WEBHOOK_URL", "")
+# Power Automate / Teams message limit — split if exceeded
+_MAX_CHARS = 20_000
 
 
 def _fmt_gbp(val) -> str:
@@ -106,23 +114,52 @@ def _build_report(p: dict, n: dict) -> str:
     return "\n".join(lines)
 
 
+async def _post_to_teams(message: str) -> None:
+    """POST message to Teams via Power Automate webhook, with one retry."""
+    chunks = [message[i : i + _MAX_CHARS] for i in range(0, len(message), _MAX_CHARS)]
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for i, chunk in enumerate(chunks):
+            payload = {"text": chunk}
+            for attempt in range(2):
+                try:
+                    resp = await client.post(TEAMS_WEBHOOK_URL, json=payload)
+                    resp.raise_for_status()
+                    break
+                except Exception as exc:
+                    if attempt == 0:
+                        await asyncio.sleep(30)
+                    else:
+                        raise RuntimeError(
+                            f"Teams delivery failed (chunk {i + 1}/{len(chunks)}): {exc}"
+                        ) from exc
+
+
 class TeamsDeliveryNode(Node):
     async def process(self, task_context: TaskContext) -> TaskContext:
         error = task_context.metadata.get("error")
 
         if error:
             alert = (
-                f"\n{'='*80}\n"
-                f"⚠️  SOP Google Ads report FAILED\n"
+                f"⚠️ **SOP Google Ads report FAILED**\n"
                 f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC\n"
                 f"Error: {error}\n"
-                f"Action: Check pipeline logs or run manually.\n"
-                f"{'='*80}\n"
+                f"Action: Check pipeline logs or run manually."
             )
-            print(alert)
+            print(f"\n{'='*80}\n{alert}\n{'='*80}\n")
+
+            if TEAMS_WEBHOOK_URL:
+                try:
+                    await _post_to_teams(alert)
+                    delivery_status = "teams_alert_sent"
+                except Exception as e:
+                    delivery_status = f"teams_alert_failed: {e}"
+            else:
+                delivery_status = "console_alert"
+
             task_context.update_node(
                 "TeamsDeliveryNode",
-                delivery_status="failed",
+                delivery_status=delivery_status,
                 delivery_error=error,
             )
             task_context.stop_workflow()
@@ -136,9 +173,19 @@ class TeamsDeliveryNode(Node):
         print(report)
         print("=" * 80 + "\n")
 
+        if TEAMS_WEBHOOK_URL:
+            try:
+                await _post_to_teams(report)
+                delivery_status = "teams_delivered"
+            except Exception as e:
+                delivery_status = f"teams_failed: {e}"
+                print(f"[TeamsDeliveryNode] Webhook delivery failed: {e}")
+        else:
+            delivery_status = "console_only"
+
         task_context.update_node(
             "TeamsDeliveryNode",
-            delivery_status="console_demo",
+            delivery_status=delivery_status,
             delivery_error=None,
         )
         return task_context
