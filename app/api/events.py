@@ -62,4 +62,4 @@ def get_workflow_type() -> str:
     """
     Implement your logic to determine the workflow type based on the event data.
     """
-    return WorkflowRegistry.EXAMPLE_CUSTOMER_CARE_WORKFLOW.name
+    return WorkflowRegistry.EXAMPLE_STREAMING_WORKFLOW.name
