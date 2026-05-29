@@ -10,13 +10,12 @@ import asyncio
 import logging
 from abc import ABC
 from contextlib import contextmanager, nullcontext
-from typing import Dict, Optional, ClassVar, Type, Any, AsyncIterator
+from typing import Dict, Optional, ClassVar, Type, Any
 
 from dotenv import load_dotenv
 from langfuse import get_client
 
 from core.exceptions import LangfuseAuthenticationError
-from core.nodes.agent_streaming_node import AgentStreamingNode
 from core.nodes.base import Node
 from core.nodes.router import BaseRouter
 from core.schema import WorkflowSchema, NodeConfig
@@ -171,87 +170,6 @@ class Workflow(ABC):
             TaskContext containing the results of workflow execution.
         """
         return await self.__run(event)
-
-    async def run_stream_async(self, event: Any) -> AsyncIterator[Dict[str, Any]]:
-        """Executes the workflow with streaming support, yielding events as they occur.
-
-        Args:
-            event: The event data to process through the workflow.
-
-        Yields:
-            Dict containing streaming events with type and data fields.
-            Error events have type "error" with an "error" field.
-
-        Raises:
-            Exception: Re-raises any exception that occurs during workflow execution.
-        """
-        task_context = TaskContext(event=event)
-
-        with self._observation_context(self.__class__.__name__) as workflow_span:
-            try:
-                logging.info("Starting workflow streaming execution")
-
-                # Parse the raw event to the Pydantic schema defined in the WorkflowSchema
-                task_context.event = self.workflow_schema.event_schema(**event)
-                workflow_span.update(input=event)
-                logging.info(
-                    f"Parsed event with schema: {self.workflow_schema.event_schema.__name__}"
-                )
-
-                task_context.metadata["nodes"] = self.nodes
-                current_node_class = self.workflow_schema.start
-                logging.info(f"Starting with node: {current_node_class.__name__}")
-
-                while current_node_class:
-                    if task_context.should_stop:
-                        logging.info("Stopping workflow execution")
-                        break
-
-                    current_node = self.nodes[current_node_class].node
-                    node_name = current_node_class.__name__
-
-                    with self._observation_context(node_name) as node_span:
-                        node_span.update(
-                            input=task_context.model_dump(
-                                exclude={"metadata": {"nodes"}}
-                            )
-                        )
-
-                        with self.node_context(node_name):
-                            if not issubclass(current_node, BaseRouter):
-                                node_instance = current_node(task_context=task_context)
-                                logging.info(f"Node instance created: {node_name}")
-
-                                if isinstance(node_instance, AgentStreamingNode):
-                                    async for stream_event in node_instance.process(
-                                        task_context
-                                    ):
-                                        yield stream_event
-                                else:
-                                    task_context = await node_instance.process(
-                                        task_context
-                                    )
-
-                            node_span.update(
-                                output=task_context.model_dump(
-                                    include={"nodes": {node_name}}
-                                )
-                            )
-
-                    current_node_class = await self._get_next_node_class(
-                        current_node_class, task_context
-                    )
-
-                workflow_span.update(
-                    output=task_context.model_dump(exclude={"metadata": {"nodes"}})
-                )
-                task_context.metadata.pop("nodes", None)
-
-            except Exception as e:
-                logging.error(f"Error in workflow execution: {str(e)}", exc_info=True)
-                workflow_span.update(level="ERROR", status_message=str(e))
-                yield {"type": "error", "error": str(e)}
-                raise
 
     async def __run(self, event: Any) -> TaskContext:
         """Executes the workflow for a given event.

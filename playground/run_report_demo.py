@@ -15,4 +15,6 @@ if __name__ == "__main__":
 
     print(f"Running SOP Google Ads report | override_date={override_date or 'auto (D-1/D-2)'}")
     workflow = GoogleAdsReportWorkflow()
-    workflow.run(event)
+    result = workflow.run(event)
+    status = result.nodes.get("TeamsDeliveryNode", {}).get("delivery_status", "unknown")
+    print(f"\n[delivery_status] {status}")
