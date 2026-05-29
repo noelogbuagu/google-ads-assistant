@@ -80,22 +80,18 @@ def _build_report(p: dict, n: dict) -> str:
         f"| CPC | {_fmt_gbp(snap['cpc'])} | — | — |",
         "",
         "### Campaign Breakdown",
-        "| Campaign | Spend | Δ | Conv | Δ | CPA | Δ | ROAS |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Campaign | Spend | Conv | CPA |",
+        "|---|---|---|---|",
     ]
 
     for r in campaigns:
         flag = "🔴 " if r["anomaly_severity"] == "critical" else ("🟡 " if r["anomaly_severity"] == "warning" else "")
         suffix = " *(no spend)*" if not r["has_spend"] else ""
-        roas_str = f"{r['roas']:.2f}" if r["roas"] else "—"
         name = _display_name(r["campaign"])
-        lines.append(
-            f"| {flag}{name}{suffix} "
-            f"| {_fmt_gbp(r['cost'])} | {_fmt_delta(r['cost_delta_pct'])} "
-            f"| {r['new_orders']} | {_fmt_delta(r['new_orders_delta_pct'])} "
-            f"| {_fmt_gbp(r['cpa'])} | {_fmt_delta(r['cpa_delta_pct'])} "
-            f"| {roas_str} |"
-        )
+        spend_str = f"{_fmt_gbp(r['cost'])} {_fmt_delta(r['cost_delta_pct'])}"
+        conv_str = f"{r['new_orders']} {_fmt_delta(r['new_orders_delta_pct'])}"
+        cpa_str = f"{_fmt_gbp(r['cpa'])} {_fmt_delta(r['cpa_delta_pct'])}"
+        lines.append(f"| {flag}{name}{suffix} | {spend_str} | {conv_str} | {cpa_str} |")
 
     lines += [
         "",
